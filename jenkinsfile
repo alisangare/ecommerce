@@ -2,52 +2,78 @@ pipeline {
     agent {
         docker {
             image 'docker-agent-alpine'
-            label 'docker' 
+            label 'docker'
             reuseNode true
         }
     }
+    
+
     
     stages {
         stage('Checkout') {
             steps {
                 checkout scm
+                sh 'echo "Code source récupéré (commit: ${GIT_COMMIT})"'
             }
         }
         
-        stage('Test simple') {
+        stage('Build') {
             steps {
                 script {
-                    sh '''
-                        echo "Structure du projet:"
-                        ls -al
-                    '''
-                    
+                     
+                    // Exemple pour un projet Node.js
+                    else if (fileExists('package.json')) {
+                        sh 'npm install && npm run build'
+                        stash name: 'dist', includes: 'dist/**/*'
+                    }
+                    // Fallback générique
+                    else {
+                        sh 'echo "Build minimal - copie des fichiers"'
+                        sh 'mkdir -p build && cp -r * build/'
+                        stash name: 'build', includes: 'build/**/*'
+                    }
+                }
+            }
+        }
+        
+        stage('Test') {
+            steps {
+                script {
                     if (fileExists('test.sh')) {
-                        sh 'chmod +x test.sh && ./test.sh'
+                        sh './test.sh'
                     } else {
-                        echo "Aucun script test.sh trouvé"
+                        echo "Aucun script de test trouvé, étape ignorée"
                     }
+                }
+            }
+        }
+        
+        stage('Déploiement') {
+            steps {
+                script {
+                    // Récupère les artefacts du build
+                    unstash 'binaries'  // Adaptez au nom utilisé dans le stage Build
                     
-
-                    if (!fileExists('README.md')) {
-                        error "Fichier README.md manquant - test échoué"
-                    } else {
-                        echo "Fichier README.md présent - test réussi"
+                    // Déploiement simple via SSH
+                    sshagent([SSH_CREDS]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${SERVER_IP} "mkdir -p ${DEPLOY_DIR}"
+                            scp -r bin/* ${SERVER_IP}:${DEPLOY_DIR}/
+                            ssh ${SERVER_IP} "chmod +x ${DEPLOY_DIR}/*"
+                        """
                     }
+                    echo "Déployé sur ${SERVER_IP}:${DEPLOY_DIR}"
                 }
             }
         }
     }
     
     post {
-        always {
-            echo "Nettoyage terminé - build #${env.BUILD_NUMBER}"
+        failure {
+            slackSend(color: 'danger', message: "Échec du pipeline: ${env.JOB_NAME} #${env.BUILD_NUMBER}")
         }
         success {
-            echo "✅ Tous les tests ont réussi!"
-        }
-        failure {
-            echo "❌ Certains tests ont échoué"
+            slackSend(color: 'good', message: "Déploiement réussi: ${env.JOB_NAME} #${env.BUILD_NUMBER}")
         }
     }
 }
