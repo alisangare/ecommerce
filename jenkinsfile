@@ -1,33 +1,53 @@
 pipeline {
-    agent { 
-        node {
-            label 'docker-agent-alpine'
-            }
-      }
-    triggers {
-        pollSCM '* * * * *'
+    agent {
+        docker {
+            image 'docker-agent-alpine'
+            label 'docker' 
+            reuseNode true
+        }
     }
+    
     stages {
-        stage('Build') {
+        stage('Checkout') {
             steps {
-                echo "Building.."
-                sh '''
-                '''
+                checkout scm
             }
         }
-        stage('Test') {
+        
+        stage('Test simple') {
             steps {
-                echo "Testing.."
-                sh '''
-                '''
+                script {
+                    sh '''
+                        echo "Structure du projet:"
+                        ls -al
+                    '''
+                    
+                    if (fileExists('test.sh')) {
+                        sh 'chmod +x test.sh && ./test.sh'
+                    } else {
+                        echo "Aucun script test.sh trouvé"
+                    }
+                    
+
+                    if (!fileExists('README.md')) {
+                        error "Fichier README.md manquant - test échoué"
+                    } else {
+                        echo "Fichier README.md présent - test réussi"
+                    }
+                }
             }
         }
-        stage('Deliver') {
-            steps {
-                echo 'Deliver....'
-                sh '''
-                '''
-            }
+    }
+    
+    post {
+        always {
+            echo "Nettoyage terminé - build #${env.BUILD_NUMBER}"
+        }
+        success {
+            echo "✅ Tous les tests ont réussi!"
+        }
+        failure {
+            echo "❌ Certains tests ont échoué"
         }
     }
 }
