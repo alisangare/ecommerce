@@ -1,79 +1,105 @@
+// Jenkinsfile
+// Ce pipeline s'exécutera sur un agent spécifique (ici, un conteneur Docker temporaire).
+
 pipeline {
+    // Agent: Nous spécifions ici un agent dynamique (un conteneur Docker).
+    // Cela signifie que Jenkins va démarrer un nouveau conteneur à partir de l'image 'node:18-slim'
+    // et exécuter toutes les étapes du pipeline à l'intérieur de ce conteneur.
+    // L'option 'args' est cruciale ici : elle monte le socket Docker de l'hôte
+    // dans le conteneur agent, permettant à ce conteneur d'exécuter des commandes Docker.
     agent {
         docker {
-            image 'docker-agent-alpine'
-            label 'docker'
-            reuseNode true
+            image 'node:18-slim' // Choisissez une image qui contient les outils nécessaires (ex: Node.js, npm)
+            args '-v /var/run/docker.sock:/var/run/docker.sock' // Permet à l'agent d'utiliser le Docker de l'hôte
         }
     }
-    
 
-    
+    // Environment: Définit des variables d'environnement globales pour le pipeline.
+    environment {
+        // Remplacez par votre nom d'utilisateur Docker Hub
+        DOCKER_HUB_CREDENTIALS = credentials('alisangare') // ID des identifiants Jenkins
+        // Remplacez par le nom de votre image Docker
+        DOCKER_IMAGE_NAME = "jenkins/agent:latest-jdk17"
+    }
+
+    // Stages: Les différentes phases logiques de votre pipeline.
     stages {
-        stage('Checkout') {
+        // Stage 1: Checkout du Code
+        // (Exécuté à l'intérieur du conteneur 'node:18-slim')
+        stage('Checkout Code') {
             steps {
-                checkout scm
-                sh 'echo "Code source récupéré (commit: ${GIT_COMMIT})"'
+                // Jenkins s'occupe de cloner le dépôt dans l'espace de travail de l'agent.
+                git branch: 'master', url: 'https://github.com/alisangare/ecommerce.git'
+                echo "Code cloné avec succès à l'intérieur de l'agent Docker."
             }
         }
-        
-        stage('Build') {
+
+        // Stage 2: Installation des Dépendances
+        // (Exécuté à l'intérieur du conteneur 'node:18-slim' qui a npm)
+        stage('Install Dependencies') {
             steps {
+                echo "Installation des dépendances..."
+                sh 'npm install' // Utilisez npm car l'agent est basé sur 'node:18-slim'
+                echo "Dépendances installées."
+            }
+        }
+
+        // Stage 3: Exécution des Tests
+        // (Exécuté à l'intérieur du conteneur 'node:18-slim')
+        stage('Run Tests') {
+            steps {
+                echo "Exécution des tests unitaires..."
+                sh 'npm test' // Exécute les tests avec npm
+                echo "Tests terminés."
+            }
+        }
+
+        // Stage 4: Build de l'Image Docker
+        // (Exécuté à l'intérieur du conteneur 'node:18-slim', qui peut accéder au Docker de l'hôte)
+        stage('Build Docker Image') {
+            steps {
+                echo "Construction de l'image Docker..."
                 script {
-                     
-                    // Exemple pour un projet Node.js
-                    else if (fileExists('package.json')) {
-                        sh 'npm install && npm run build'
-                        stash name: 'dist', includes: 'dist/**/*'
+                    withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', passwordVariable: 'DOCKER_PASSWORD', usernameVariable: 'DOCKER_USERNAME')]) {
+                        sh "echo \$DOCKER_PASSWORD | docker login -u \$DOCKER_USERNAME --password-stdin"
                     }
-                    // Fallback générique
-                    else {
-                        sh 'echo "Build minimal - copie des fichiers"'
-                        sh 'mkdir -p build && cp -r * build/'
-                        stash name: 'build', includes: 'build/**/*'
-                    }
+
+                    // Construire l'image Docker. Ici, le 'docker' est le client Docker
+                    // exécuté dans le conteneur 'node:18-slim', mais il interagit
+                    // avec le démon Docker de l'hôte grâce au montage du socket.
+                    sh "docker build -t ${DOCKER_IMAGE_NAME}:${env.BUILD_NUMBER} ."
+                    echo "Image Docker construite : ${DOCKER_IMAGE_NAME}:${env.BUILD_NUMBER}"
                 }
             }
         }
-        
-        stage('Test') {
+
+        // Stage 5: Push de l'Image Docker
+        // (Exécuté à l'intérieur du conteneur 'node:18-slim')
+        stage('Push Docker Image') {
             steps {
+                echo "Poussée de l'image Docker vers Docker Hub..."
                 script {
-                    if (fileExists('test.sh')) {
-                        sh './test.sh'
-                    } else {
-                        echo "Aucun script de test trouvé, étape ignorée"
-                    }
-                }
-            }
-        }
-        
-        stage('Déploiement') {
-            steps {
-                script {
-                    // Récupère les artefacts du build
-                    unstash 'binaries'  // Adaptez au nom utilisé dans le stage Build
-                    
-                    // Déploiement simple via SSH
-                    sshagent([SSH_CREDS]) {
-                        sh """
-                            ssh -o StrictHostKeyChecking=no ${SERVER_IP} "mkdir -p ${DEPLOY_DIR}"
-                            scp -r bin/* ${SERVER_IP}:${DEPLOY_DIR}/
-                            ssh ${SERVER_IP} "chmod +x ${DEPLOY_DIR}/*"
-                        """
-                    }
-                    echo "Déployé sur ${SERVER_IP}:${DEPLOY_DIR}"
+                    sh "docker push ${DOCKER_IMAGE_NAME}:${env.BUILD_NUMBER}"
+                    sh "docker tag ${DOCKER_IMAGE_NAME}:${env.BUILD_NUMBER} ${DOCKER_IMAGE_NAME}:latest"
+                    sh "docker push ${DOCKER_IMAGE_NAME}:latest"
+                    echo "Image Docker poussée : ${DOCKER_IMAGE_NAME}:latest"
+                    sh "docker logout"
                 }
             }
         }
     }
-    
+
+    // Post-actions: Exécutées après que le pipeline principal soit terminé.
     post {
-        failure {
-            slackSend(color: 'danger', message: "Échec du pipeline: ${env.JOB_NAME} #${env.BUILD_NUMBER}")
+        always {
+            echo 'Pipeline terminé.'
+            cleanWs() // Nettoie l'espace de travail de l'agent
         }
         success {
-            slackSend(color: 'good', message: "Déploiement réussi: ${env.JOB_NAME} #${env.BUILD_NUMBER}")
+            echo 'Pipeline exécuté avec succès !'
+        }
+        failure {
+            echo 'Pipeline a échoué !'
         }
     }
 }
